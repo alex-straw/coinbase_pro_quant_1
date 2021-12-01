@@ -3,9 +3,9 @@ import pandas as pd
 import config
 import numpy as np
 
-parameters = {'product': 'LINK-USD',
+parameters = {'product': 'ALGO-USD',
               'level': 2,
-              'run_duration': 5,
+              'run_duration': 180,
               'lob_update_interval': 0.5,
               'bid_ask_depth': 5}
 
@@ -50,12 +50,20 @@ class GradientTrader:
         self.cur_bid_ask_df = pd.DataFrame()
         self.memory_arr = []
         self.trade_history = []
-        self.starting_usd = 1000
+        self.capital = 1000
         self.market_pressure_ratio = np.NaN
 
+        # Market pressure ratio threshold for entering long position
+        # Initially this value is constant
+        self.trade_threshold = 1.3
+        self.trade_size = 500  # how large the trade will be in USD
+        self.position_hold_time = 30  # How long the trade will be open in seconds
+
         # If a trade takes place, update these
+        self.trade_active = False
         self.long_price = np.NaN
         self.long_qty = np.NaN
+        self.trade_entry_time = np.NaN
 
     def update_memory(self, lob, current_time):
         # Update the bid_ask_df attribute for GradientTrader
@@ -77,14 +85,37 @@ class GradientTrader:
         This will eventually take into account the changes in this ratio included in the trader's memory.
         """
         self.market_pressure_ratio = abs(self.memory_arr[-1][2] / self.memory_arr[-1][4])
-        if self.market_pressure_ratio > 1.5:
-            print("Entering a long position, market pressure ratio: " + str(self.market_pressure_ratio) + ".")
-
+        if self.market_pressure_ratio > self.trade_threshold:
+            if not self.trade_active:  # Only open a trade if there is not currently one active
+                print("Entering a long position, market pressure ratio: " + str(self.market_pressure_ratio) + ".")
+                self.enter_long_position(time.time())
         else:
-            print("No clear long entry, market pressure ratio: " + str(self.market_pressure_ratio) + ".")
+            #print("No clear long entry, market pressure ratio: " + str(self.market_pressure_ratio) + ".")
+            pass
 
-    def execute_long(self):
-        pass
+    def enter_long_position(self, cur_time):
+        """
+        For now, ignore market impact and available quantity. Enter a $500 position long at the best ask.
+        """
+        self.long_price = self.memory_arr[-1][3]
+        self.long_qty = self.trade_size / self.long_price
+        self.trade_entry_time = cur_time
+        self.trade_active = True
+        self.capital -= self.trade_size
+
+    def exit_long_position(self, cur_time):
+        """
+        Sell the position to the best bid if the trade has been open for longer than the specified duration
+        """
+        if cur_time - self.trade_entry_time > self.position_hold_time:
+            # Change in price, multiplied by the amount of the token purchased
+            # Update total capital owned
+            self.capital += self.memory_arr[-1][1]* self.long_qty
+            self.long_price = np.NaN
+            self.long_qty = np.NaN
+            self.trade_entry_time = np.NaN
+            self.trade_active = False
+            print(self.capital)
 
 
 def calculate_gradient(best_price, worst_price, cumsum_qty):
@@ -143,7 +174,7 @@ def main(parameters):
     memory_arr = []
 
     trader_zero = GradientTrader(memory_size=10,
-                                 lob_depth=200,
+                                 lob_depth=20,
                                  paper_hands_time=10)
 
     while True:
@@ -155,6 +186,9 @@ def main(parameters):
         lob = get_lob(auth_client, parameters['product'], parameters['level'])
 
         trader_zero.update_memory(lob, current_time)
+
+        # Checks if the trader should exit the trade
+        trader_zero.exit_long_position(current_time)
 
         # Wait a set duration until requesting lob again
         time.sleep(parameters['lob_update_interval'])

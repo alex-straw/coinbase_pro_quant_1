@@ -3,11 +3,11 @@ import pandas as pd
 import config
 import numpy as np
 
-parameters = {'product': 'ALGO-USD',
+parameters = {'product': 'DOGE-GBP',
               'level': 2,
               'run_duration': 180,
-              'lob_update_interval': 0.5,
-              'bid_ask_depth': 5}
+              'lob_update_interval': 0.25,
+              'bid_ask_depth': 50}
 
 
 # Gradient trader
@@ -40,18 +40,19 @@ def get_bid_asks(lob, lob_depth):
 
 class GradientTrader:
 
-    def __init__(self, memory_size, lob_depth, paper_hands_time):
+    def __init__(self, memory_size, lob_depth):
         # memory_size:  how many data points will the trader remember
         # lob_depth: how many orders will the trader look past the best ask & bid price (in the limit order book)
         # paper_hands_ratio: how long will the trader hold on the spot buy
         self.memory_size = memory_size
         self.lob_depth = lob_depth
-        self.paper_hands_time = paper_hands_time
         self.cur_bid_ask_df = pd.DataFrame()
         self.memory_arr = []
         self.trade_history = []
         self.capital = 1000
         self.market_pressure_ratio = np.NaN
+        self.market_pressure_arr = []
+        self.average_pressure_ratio = np.NaN
 
         # Market pressure ratio threshold for entering long position
         # Initially this value is constant
@@ -71,10 +72,21 @@ class GradientTrader:
         # Memory array : Timestamp | bid_gradient | ask_gradient | spread
         self.memory_arr.extend([evaluate_market_state(current_time, self.cur_bid_ask_df)])
         # Keep memory array at a consistent length according to instance of GradientTrader
-        if len(self.memory_arr) > self.memory_size:
+        if len(self.memory_arr)-1 > self.memory_size:
             self.memory_arr.pop(0)
 
         self.compute_trade_decision()
+
+    def calculate_average_market_pressure(self):
+        # calculate weighted avg - skewed towards recent values
+        self.average_pressure_ratio = sum(self.market_pressure_arr)/self.memory_size
+
+    def calculate_recent_market_pressure(self):
+        """ simply looks at the most recent market pressure in last LOB call """
+        self.market_pressure_ratio = abs(self.memory_arr[-1][2] / self.memory_arr[-1][4])
+        self.market_pressure_arr.append(self.market_pressure_ratio)
+        if len(self.market_pressure_arr) > self.memory_size:
+            self.market_pressure_arr.pop(0)
 
     def compute_trade_decision(self):
         """
@@ -84,14 +96,15 @@ class GradientTrader:
         Currently, this only looks at the exact pressure ratio for the given timestamp.
         This will eventually take into account the changes in this ratio included in the trader's memory.
         """
-        self.market_pressure_ratio = abs(self.memory_arr[-1][2] / self.memory_arr[-1][4])
-        if self.market_pressure_ratio > self.trade_threshold:
-            if not self.trade_active:  # Only open a trade if there is not currently one active
-                print("Entering a long position, market pressure ratio: " + str(self.market_pressure_ratio) + ".")
-                self.enter_long_position(time.time())
-        else:
-            #print("No clear long entry, market pressure ratio: " + str(self.market_pressure_ratio) + ".")
-            pass
+
+        self.calculate_recent_market_pressure()
+
+        if len(self.market_pressure_arr) == self.memory_size:  # Check enough data has been collected
+            self.calculate_average_market_pressure()  # Calculate weighted market pressure
+            if self.average_pressure_ratio > self.trade_threshold:  # Check market pressure is above threshold to trade
+                if not self.trade_active:  # Only open a trade if there is not currently one active
+                    print("Entering a long position, market pressure ratio: " + str(self.average_pressure_ratio) + ".")
+                    self.enter_long_position(time.time())
 
     def enter_long_position(self, cur_time):
         """
@@ -110,7 +123,7 @@ class GradientTrader:
         if cur_time - self.trade_entry_time > self.position_hold_time:
             # Change in price, multiplied by the amount of the token purchased
             # Update total capital owned
-            self.capital += self.memory_arr[-1][1]* self.long_qty
+            self.capital += self.memory_arr[-1][1] * self.long_qty
             self.long_price = np.NaN
             self.long_qty = np.NaN
             self.trade_entry_time = np.NaN
@@ -174,8 +187,7 @@ def main(parameters):
     memory_arr = []
 
     trader_zero = GradientTrader(memory_size=10,
-                                 lob_depth=20,
-                                 paper_hands_time=10)
+                                 lob_depth=10)
 
     while True:
         # Only run for a set duration
@@ -189,6 +201,8 @@ def main(parameters):
 
         # Checks if the trader should exit the trade
         trader_zero.exit_long_position(current_time)
+
+        print(trader_zero.average_pressure_ratio)
 
         # Wait a set duration until requesting lob again
         time.sleep(parameters['lob_update_interval'])
